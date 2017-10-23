@@ -3,10 +3,12 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <stdlib.h>
 #include <stdbool.h>
 #include <linux/uinput.h>
 #include <stdint.h>
 #include <string.h>
+#include <getopt.h>
 
 struct {
     unsigned char channel;
@@ -49,16 +51,32 @@ int main(int argc, char *argv[]) {
     int midi_fd;
     int input_fd = open("/dev/uinput", O_RDWR);
     bool verbose = false;
-    
-    if (argc != 2) {
+
+    {
+        int opt;
+        while ((opt = getopt(argc, argv, "v")) != -1) {
+            switch (opt) {
+            case 'v':
+                verbose = true;
+                break;
+            default: /* '?' */
+                usage(argv[0]);
+                return -1;
+            }
+        }
+    }
+
+    if (optind != argc - 1) {
         usage(argv[0]);
         return -1;
     }
+
     
-    midi_fd = open(argv[1], O_RDONLY);
+    midi_fd = open(argv[optind], O_RDWR);
     
     if (verbose) {
-        printf("MIDI FD %d\n", midi_fd);
+        printf("MIDI FD (%s), %d\n", argv[optind], midi_fd);
+        printf("INPUT FD (%s), %d\n", "/dev/uinput", input_fd);
     }
 
     //set up input fd;
@@ -91,7 +109,7 @@ int main(int argc, char *argv[]) {
         ioctl(input_fd, UI_DEV_SETUP, &setup);
         ioctl(input_fd, UI_DEV_CREATE);
     }
-
+    
     for (;;) {
         unsigned char c[3];
         int len;
