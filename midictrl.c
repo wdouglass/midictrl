@@ -9,6 +9,7 @@
 #include <stdint.h>
 #include <string.h>
 #include <getopt.h>
+#include <poll.h>
 
 struct {
     unsigned char channel;
@@ -30,15 +31,17 @@ struct {
     unsigned char channel;
     unsigned char key;
     uint16_t code;
+    uint16_t lednum;
+    bool ledstate;
 } buttons[] = {
-    {0x00, 0x24, BTN_0},
-    {0x00, 0x25, BTN_1},
-    {0x00, 0x26, BTN_2},
-    {0x00, 0x27, BTN_3},
-    {0x00, 0x28, BTN_4},
-    {0x00, 0x29, BTN_5},
-    {0x00, 0x2a, BTN_6},
-    {0x00, 0x2b, BTN_7},
+    {0x00, 0x24, BTN_0, 0},
+    {0x00, 0x25, BTN_1, 1},
+    {0x00, 0x26, BTN_2, 2},
+    {0x00, 0x27, BTN_3, 3},
+    {0x00, 0x28, BTN_4, 4},
+    {0x00, 0x29, BTN_5, 5},
+    {0x00, 0x2a, BTN_6, 6},
+    {0x00, 0x2b, BTN_7, 7},
     {0xFF, 0xFF, 0} //sentinal
 };
 
@@ -51,13 +54,17 @@ int main(int argc, char *argv[]) {
     int midi_fd;
     int input_fd = open("/dev/uinput", O_RDWR);
     bool verbose = false;
+    bool ledhack = false;
 
     {
         int opt;
-        while ((opt = getopt(argc, argv, "v")) != -1) {
+        while ((opt = getopt(argc, argv, "vl")) != -1) {
             switch (opt) {
             case 'v':
                 verbose = true;
+                break;
+            case 'l':
+                ledhack = true;
                 break;
             default: /* '?' */
                 usage(argv[0]);
@@ -81,7 +88,13 @@ int main(int argc, char *argv[]) {
 
     //set up input fd;
     ioctl(input_fd, UI_SET_EVBIT, EV_KEY);
+    if (ledhack) {
+        ioctl(input_fd, UI_SET_EVBIT, EV_LED);
+    }
     for (int i = 0; buttons[i].channel != 0xFF; i++) {
+        if (ledhack) {
+            ioctl(input_fd, UI_SET_LEDBIT, buttons[i].lednum);
+        }
         ioctl(input_fd, UI_SET_KEYBIT, buttons[i].code);
     }
     ioctl(input_fd, UI_SET_EVBIT, EV_ABS);
@@ -96,11 +109,10 @@ int main(int argc, char *argv[]) {
         setup.absinfo.maximum = 0x7f;
 
         ioctl(input_fd, UI_ABS_SETUP, &setup);
-        
     }
 
     {
-        struct uinput_setup setup;
+        struct uinput_setup setup = {};
         setup.id.bustype = BUS_VIRTUAL;
         setup.id.vendor = 0;
         setup.id.product = 0;
@@ -111,140 +123,201 @@ int main(int argc, char *argv[]) {
     }
     
     for (;;) {
-        unsigned char c[3];
-        int len;
-        const char *type = "";
-        //this while loop gets us in sync (if we've lost it). we don't support running status (yet)
-        do {
-            read(midi_fd, &c[0], 1);
-        } while ((c[0] & 0x80) == 0);
-
-        switch(c[0] & 0xF0) {            
-        case 0x80:
-            type = "note off";
-            len = 2;
-            break;
-        case 0x90:
-            type = "note on";
-            len = 2;
-            break;
-        case 0xA0:
-            type = "Polyphonic Key Pressure";
-            len = 2;
-            break;
-        case 0xB0:
-            type = "Controller Change";
-            len = 2;
-            break;
-        case 0xC0:
-            type = "Program Change";
-            len = 1;
-            break;
-        case 0xD0:
-            type = "Channel Key Pressure (aftertouch)";
-            len = 1;
-            break;
-        case 0xE0:
-            type = "Pitch Bend";
-            len = 2;
-            break;
-        default:
-            continue;
-        }
-
-        read(midi_fd, &c[1], len);
+        enum {
+            MIDI_FD = 0,
+            INPUT_FD,
+            NUM_FDS
+        };
+        struct pollfd fds[] = {
+            {
+                midi_fd,
+                POLLIN,
+                0
+            },
+            {
+                input_fd,
+                POLLIN,
+                0
+            }
+        };
         
-        switch(c[0] & 0xF0) {            
-        case 0x80:
-            type = "note off";
-            len = 2;
-            for (int i = 0; buttons[i].channel != 0xFF; i++) {
-                if ((buttons[i].channel == (c[0] & 0x0F)) &&
-                    (buttons[i].key == c[1])) {
-                    struct input_event ie;
-                    ie.type = EV_KEY;
-                    ie.code = buttons[i].code;
-                    ie.value = 0;
-                    //time values are ignored
-                    ie.time.tv_sec = 0;
-                    ie.time.tv_usec = 0;
-                    write(input_fd, &ie, sizeof(ie));
-                }
+        poll(fds, NUM_FDS, 1000);
+
+        if (fds[MIDI_FD].revents & POLLIN) {
+            unsigned char c[3];
+            int len;
+            const char *type = "";
+            //this while loop gets us in sync (if we've lost it). we don't support running status (yet)
+            do {
+                read(midi_fd, &c[0], 1);
+            } while ((c[0] & 0x80) == 0);
+            
+            switch(c[0] & 0xF0) {            
+            case 0x80:
+                type = "note off";
+                len = 2;
+                break;
+            case 0x90:
+                type = "note on";
+                len = 2;
+                break;
+            case 0xA0:
+                type = "Polyphonic Key Pressure";
+                len = 2;
+                break;
+            case 0xB0:
+                type = "Controller Change";
+                len = 2;
+                break;
+            case 0xC0:
+                type = "Program Change";
+                len = 1;
+                break;
+            case 0xD0:
+                type = "Channel Key Pressure (aftertouch)";
+                len = 1;
+                break;
+            case 0xE0:
+                type = "Pitch Bend";
+                len = 2;
+                break;
+            default:
+                continue;
             }
-            break;
-        case 0x90:
-            type = "note on";
-            len = 2;
-            for (int i = 0; buttons[i].channel != 0xFF; i++) {
-                if ((buttons[i].channel == (c[0] & 0x0F)) &&
-                    (buttons[i].key == c[1])) {
-                    struct input_event ie;
-                    ie.type = EV_KEY;
-                    ie.code = buttons[i].code;
-                    ie.value = !!(c[2] != 0);
-                    //time values are ignored
-                    ie.time.tv_sec = 0;
-                    ie.time.tv_usec = 0;
-                    write(input_fd, &ie, sizeof(ie));
+
+            read(midi_fd, &c[1], len);
+        
+            switch(c[0] & 0xF0) {            
+            case 0x80:
+                type = "note off";
+                len = 2;
+                for (int i = 0; buttons[i].channel != 0xFF; i++) {
+                    if ((buttons[i].channel == (c[0] & 0x0F)) &&
+                        (buttons[i].key == c[1])) {
+                        struct input_event ie;
+                        ie.type = EV_KEY;
+                        ie.code = buttons[i].code;
+                        ie.value = 0;
+                        //time values are ignored
+                        ie.time.tv_sec = 0;
+                        ie.time.tv_usec = 0;
+                        write(input_fd, &ie, sizeof(ie));
+                        if (ledhack) {
+                            unsigned char o[3] = {
+                                buttons[i].ledstate?0x90:0x80,
+                                buttons[i].key,
+                                0x7f
+                            };
+                            write(midi_fd, o, sizeof(o));
+                        }
+                    }
                 }
-            }
-            break;
-        case 0xA0:
-            type = "Polyphonic Key Pressure";
-            len = 2;
-            break;
-        case 0xB0:
-            type = "Controller Change";
-            len = 2;
-            for (int i = 0; knobs[i].channel != 0xFF; i++) {
-                if ((knobs[i].channel == (c[0] & 0x0F)) &&
-                    (knobs[i].number == c[1])) {
-                    struct input_event ie;
-                    ie.type = EV_ABS;
-                    ie.code = knobs[i].code;
-                    ie.value = c[2];
-                    //time values are ignored
-                    ie.time.tv_sec = 0;
-                    ie.time.tv_usec = 0;
-                    write(input_fd, &ie, sizeof(ie));
+                break;
+            case 0x90:
+                type = "note on";
+                len = 2;
+                for (int i = 0; buttons[i].channel != 0xFF; i++) {
+                    if ((buttons[i].channel == (c[0] & 0x0F)) &&
+                        (buttons[i].key == c[1])) {
+                        struct input_event ie;
+                        ie.type = EV_KEY;
+                        ie.code = buttons[i].code;
+                        ie.value = !!(c[2] != 0);
+                        //time values are ignored
+                        ie.time.tv_sec = 0;
+                        ie.time.tv_usec = 0;
+                        write(input_fd, &ie, sizeof(ie));
+                        if (ledhack) {
+                            unsigned char o[3] = {
+                                buttons[i].ledstate?0x90:0x80,
+                                buttons[i].key,
+                                0x7f
+                            };
+                            write(midi_fd, o, sizeof(o));
+                        }
+                    }
                 }
+                break;
+            case 0xA0:
+                type = "Polyphonic Key Pressure";
+                len = 2;
+                break;
+            case 0xB0:
+                type = "Controller Change";
+                len = 2;
+                for (int i = 0; knobs[i].channel != 0xFF; i++) {
+                    if ((knobs[i].channel == (c[0] & 0x0F)) &&
+                        (knobs[i].number == c[1])) {
+                        struct input_event ie;
+                        ie.type = EV_ABS;
+                        ie.code = knobs[i].code;
+                        ie.value = c[2];
+                        //time values are ignored
+                        ie.time.tv_sec = 0;
+                        ie.time.tv_usec = 0;
+                        write(input_fd, &ie, sizeof(ie));
+                    }
+                }
+                break;
+            case 0xC0:
+                type = "Program Change";
+                len = 1;
+                break;
+            case 0xD0:
+                type = "Channel Key Pressure (aftertouch)";
+                len = 1;
+                break;
+            case 0xE0:
+                type = "Pitch Bend";
+                len = 2;
+                break;
+            default:
+                continue;
             }
-            break;
-        case 0xC0:
-            type = "Program Change";
-            len = 1;
-            break;
-        case 0xD0:
-            type = "Channel Key Pressure (aftertouch)";
-            len = 1;
-            break;
-        case 0xE0:
-            type = "Pitch Bend";
-            len = 2;
-            break;
-        default:
-            continue;
+        
+            {
+                struct input_event ie;
+                ie.type = EV_SYN;
+                ie.code = SYN_REPORT;
+                ie.value = 0;
+                //time values are ignored
+                ie.time.tv_sec = 0;
+                ie.time.tv_usec = 0;
+                write(input_fd, &ie, sizeof(ie));
+            }
+
+            if (verbose) {
+                if (len == 1) {
+                    printf("%s %02x %02x\n", type, c[0] & 0xFF, c[1] & 0xFF);
+                }
+                else {
+                    printf("%s %02x %02x %02x\n", type, c[0] & 0xFF, c[1] & 0xFF, c[2] & 0xFF);
+                }
+                fflush(stdout);
+            }
         }
         
-        {
+        if (fds[INPUT_FD].revents & POLLIN) {
             struct input_event ie;
-            ie.type = EV_SYN;
-            ie.code = SYN_REPORT;
-            ie.value = 0;
-            //time values are ignored
-            ie.time.tv_sec = 0;
-            ie.time.tv_usec = 0;
-            write(input_fd, &ie, sizeof(ie));
-        }
+            read(input_fd, &ie, sizeof(ie));
 
-        if (verbose) {
-            if (len == 1) {
-                printf("%s %02x %02x\n", type, c[0] & 0xFF, c[1] & 0xFF);
+            if (ledhack) {
+                if (ie.type == EV_LED) {
+                    for (int i = 0; buttons[i].channel != 0xFF; i++) {
+                        if (buttons[i].lednum == ie.code) {
+                            buttons[i].ledstate = !!ie.value;
+                            {
+                                unsigned char o[3] = {
+                                buttons[i].ledstate?0x90:0x80,
+                                buttons[i].key,
+                                0x7f
+                                };
+                                write(midi_fd, o, sizeof(o));
+                            }
+                        }
+                    }
+                }
             }
-            else {
-                printf("%s %02x %02x %02x\n", type, c[0] & 0xFF, c[1] & 0xFF, c[2] & 0xFF);
-            }
-            fflush(stdout);
         }
     }
     
