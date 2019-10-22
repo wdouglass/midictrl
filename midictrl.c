@@ -56,6 +56,11 @@ int main(int argc, char *argv[]) {
     bool verbose = false;
     bool ledhack = false;
 
+    if (input_fd < 0) {
+        printf("Cannot open /dev/uinput: %m\n");
+        return -1;
+    }
+    
     {
         int opt;
         while ((opt = getopt(argc, argv, "vl")) != -1) {
